@@ -194,8 +194,7 @@ class Room:
 
 
 def make_default_room() -> Room:
-    """A simple 10x8m room with a couple of objects for testing."""
     room = Room(width=10.0, height=8.0)
     room.add_object(Object(position=[3.0, 3.0], width=1.0, height=2.0, label="couch"))
-    room.add_object(Object(position=[7.0, 5.0], width=0.5, height=0.5, label="person"))
+    room.add_person(Person(position=[7.0, 5.0], facing=np.pi, label="person_1"))
     return room
