@@ -56,15 +56,97 @@ class Object:
 
 
 @dataclass
+class Person:
+    """
+    A person in the room. Has a position, a facing direction, and a mouth point.
+    Treated as a capsule shape for ray bouncing (head + body as two overlapping boxes).
+    The mouth point is where speech waves originate.
+    """
+    position: np.ndarray        # center of body [x, y]
+    facing: float = 0.0         # angle in radians, 0 = facing right
+    absorption: float = 0.6     # bodies absorb more sound than walls
+    label: Optional[str] = None
+
+    # body dimensions (meters)
+    body_width: float = 0.45
+    body_height: float = 0.3
+    head_radius: float = 0.12
+
+    def __post_init__(self):
+        self.position = np.array(self.position, dtype=float)
+
+        # speech wave state
+        self.is_speaking: bool = False
+        self.speech_amplitude: float = 0.0  # 0.0 - 1.0, driven by mic input
+
+    @property
+    def mouth_point(self) -> np.ndarray:
+        """Point slightly in front of the face — where speech waves emit from."""
+        facing_dir = np.array([np.cos(self.facing), np.sin(self.facing)])
+        # mouth is at head position + a little forward
+        head_offset = facing_dir * (self.body_height / 2 + self.head_radius)
+        mouth_offset = facing_dir * 0.05  # a bit in front of the head center
+        return self.position + head_offset + mouth_offset
+
+    @property
+    def head_position(self) -> np.ndarray:
+        """Center of the head."""
+        facing_dir = np.array([np.cos(self.facing), np.sin(self.facing)])
+        return self.position + facing_dir * (self.body_height / 2 + self.head_radius)
+
+    @property
+    def walls(self) -> list[Wall]:
+        """
+        Approximate the person as two rectangles: torso and head box.
+        Good enough for ray bouncing.
+        """
+        # torso
+        x, y = self.position
+        hw, hh = self.body_width / 2, self.body_height / 2
+        torso_corners = [
+            [x - hw, y - hh],
+            [x + hw, y - hh],
+            [x + hw, y + hh],
+            [x - hw, y + hh],
+        ]
+        torso_walls = [
+            Wall(torso_corners[i], torso_corners[(i + 1) % 4], absorption=self.absorption)
+            for i in range(4)
+        ]
+
+        # head (small square approximation)
+        hx, hy = self.head_position
+        hr = self.head_radius
+        head_corners = [
+            [hx - hr, hy - hr],
+            [hx + hr, hy - hr],
+            [hx + hr, hy + hr],
+            [hx - hr, hy + hr],
+        ]
+        head_walls = [
+            Wall(head_corners[i], head_corners[(i + 1) % 4], absorption=self.absorption)
+            for i in range(4)
+        ]
+
+        return torso_walls + head_walls
+
+    def set_speaking(self, amplitude: float):
+        """Called by mic_input to update speech state."""
+        self.speech_amplitude = float(np.clip(amplitude, 0.0, 1.0))
+        self.is_speaking = self.speech_amplitude > 0.05
+
+
+@dataclass
 class Room:
     """
-    A 2D rectangular room with walls and optional objects inside.
+    A 2D rectangular room with walls, objects, and people inside.
     Origin is bottom-left corner.
     """
     width: float                        # meters
     height: float                       # meters
     wall_absorption: float = 0.05
     objects: list[Object] = field(default_factory=list)
+    people: list[Person] = field(default_factory=list)
 
     def __post_init__(self):
         self._build_walls()
@@ -81,14 +163,23 @@ class Room:
 
     @property
     def all_walls(self) -> list[Wall]:
-        """All walls: room boundary + object walls."""
+        """All walls: room boundary + object walls + people."""
         walls = list(self.boundary_walls)
         for obj in self.objects:
             walls.extend(obj.walls)
+        for person in self.people:
+            walls.extend(person.walls)
         return walls
 
     def add_object(self, obj: Object):
         self.objects.append(obj)
+
+    def add_person(self, person: Person):
+        self.people.append(person)
+
+    @property
+    def speaking_people(self) -> list[Person]:
+        return [p for p in self.people if p.is_speaking]
 
     def is_inside(self, point: np.ndarray) -> bool:
         """Check if a point is inside the room boundary."""
