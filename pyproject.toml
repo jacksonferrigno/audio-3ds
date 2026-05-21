@@ -1,0 +1,14 @@
+[project]
+name = "audio-3ds"
+version = "0.1.0"
+description = "Fun project using RL and sounds to cast projection of the room"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gymnasium>=1.2.3",
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.6",
+    "pygame>=2.6.1",
+    "scipy>=1.17.1",
+    "stable-baselines3>=2.8.0",
+]
