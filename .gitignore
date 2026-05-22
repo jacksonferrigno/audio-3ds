@@ -151,12 +151,11 @@ activemq-data/
 .env
 .envrc
 .venv
-env/
+runs
 venv/
-ENV/
 env.bak/
 venv.bak/
-
+checkpoints/
 # Spyder project settings
 .spyderproject
 .spyproject
