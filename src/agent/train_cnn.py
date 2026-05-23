@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from stable_baselines3 import PPO
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 from src.agent.cnn_model import (
     CLASS_NAMES,
@@ -122,10 +123,10 @@ def augment_sample(
         occ = np.flip(occ, axis=0)
         lab = np.flip(lab, axis=0)
 
-    rotations = int(rng.integers(0, 4))
-    if rotations:
-        occ = np.rot90(occ, k=rotations)
-        lab = np.rot90(lab, k=rotations)
+    # 180° only — 90/270 swap (80, 100) → (100, 80) on our non-square grid
+    if rng.random() < 0.5:
+        occ = np.rot90(occ, k=2)
+        lab = np.rot90(lab, k=2)
 
     noise = rng.normal(0.0, 0.02, size=occ.shape).astype(np.float32)
     occ = np.clip(occ + noise, 0.0, 1.0)
@@ -213,7 +214,7 @@ def evaluate(
     total_acc = 0.0
     merged_class_acc: dict[str, list[float]] = {name: [] for name in CLASS_NAMES}
 
-    for x, y in loader:
+    for x, y in tqdm(loader, desc="val", leave=False):
         x = x.to(device)
         y = y.to(device)
 
@@ -289,12 +290,20 @@ def train_cnn(
     best_val_loss = float("inf")
     start = time.time()
 
-    for epoch in range(1, epochs + 1):
+    epoch_bar = tqdm(range(1, epochs + 1), desc="epochs", unit="epoch")
+
+    for epoch in epoch_bar:
         model.train()
         train_loss = 0.0
         train_acc = 0.0
 
-        for x, y in train_loader:
+        batch_bar = tqdm(
+            train_loader,
+            desc=f"train {epoch}/{epochs}",
+            leave=False,
+            unit="batch",
+        )
+        for x, y in batch_bar:
             x = x.to(torch_device)
             y = y.to(torch_device)
 
@@ -304,8 +313,11 @@ def train_cnn(
             loss.backward()
             optimizer.step()
 
-            train_loss += float(loss.item())
-            train_acc += pixel_accuracy(logits, y)
+            batch_loss = float(loss.item())
+            batch_acc = pixel_accuracy(logits, y)
+            train_loss += batch_loss
+            train_acc += batch_acc
+            batch_bar.set_postfix(loss=f"{batch_loss:.4f}", acc=f"{batch_acc:.3f}")
 
         n_train_batches = max(len(train_loader), 1)
         train_loss /= n_train_batches
@@ -315,17 +327,17 @@ def train_cnn(
             model, val_loader, loss_fn, torch_device
         )
 
-        print(
-            f"epoch {epoch:02d}/{epochs} | "
-            f"train loss {train_loss:.4f} acc {train_acc:.3f} | "
-            f"val loss {val_loss:.4f} acc {val_acc:.3f}"
+        epoch_bar.set_postfix(
+            train_loss=f"{train_loss:.4f}",
+            val_loss=f"{val_loss:.4f}",
+            val_acc=f"{val_acc:.3f}",
         )
         if val_class_acc:
             top_classes = ", ".join(
                 f"{name} {acc:.2f}"
                 for name, acc in sorted(val_class_acc.items(), key=lambda item: -item[1])[:3]
             )
-            print(f"  val class acc: {top_classes}")
+            tqdm.write(f"  val class acc: {top_classes}")
 
         torch.save(
             {
@@ -341,7 +353,7 @@ def train_cnn(
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), BEST_MODEL_PATH)
-            print(f"  saved best model -> {BEST_MODEL_PATH}")
+            tqdm.write(f"  saved best model -> {BEST_MODEL_PATH}")
 
     elapsed = time.time() - start
     print(f"\ntraining complete in {elapsed:.1f}s")

@@ -138,7 +138,7 @@ Pipeline:
 2. Run the trained RL agent for ~50 steps and collect the occupancy map it built
 3. Ground truth labels come from known room geometry (`build_label_map`)
 4. Train the CNN on agent-built map ↔ label pairs
-5. Augment training maps — random flips, rotations, and noise — so the CNN generalizes layout, not memorizes it
+5. Augment training maps — random flips, 180° rotation, and noise — so the CNN generalizes layout, not memorizes it
 
 ### Run
 
