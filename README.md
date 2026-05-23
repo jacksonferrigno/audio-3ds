@@ -1,5 +1,7 @@
 # audio-3ds
 
+*models are currently training* 
+
 ## Fun physics about this project
 
 Sounds propagtes as a pressure wave - compressed air molecules pushing into neighboring molecultes, radiating outwards in all directions from the source. When this wave hits a surface, it tells us about the object. Hard flat surfaces reflect cleanly. Soft material absorbs more.
@@ -68,4 +70,85 @@ A random agent scores around `-0.26` per step. A trained agent should push towar
 
 ---
 
-That's the full README core. Want to add an architecture overview diagram or go straight to writing it out as a full file?
+## CNN
+
+The RL occupancy map is raw signal — a fine-grained accumulation of what echoes returned, cell by cell. It tells you *something* is probably here, but not *what* it is. The CNN is the translation layer: it reads that map and produces a semantic visual the viewer can actually understand.
+
+For people watching the software run, this is what turns the agent's internal belief into walls, furniture, and people on screen.
+
+### Input
+
+The occupancy map the RL agent built over an episode — shape `(1, 80, 100)`.
+
+Single channel, same 10cm grid as the RL env. Each cell is a probability between 0 and 1 — how confident the agent is that something is physically present there. This is not ground truth geometry. It's the textured, probe-patterned map the trained agent actually produces.
+
+### Output
+
+Per-cell semantic labels — shape `(6, 80, 100)`. One channel per class:
+
+
+| Class | Label          | What it means              |
+| ----- | -------------- | -------------------------- |
+| 0     | `empty`        | Open floor space           |
+| 1     | `wall`         | Room boundary              |
+| 2     | `furniture`    | Objects in the room        |
+| 3     | `person_torso` | Body                       |
+| 4     | `person_head`  | Head                       |
+| 5     | `unknown`      | Uncertain / low confidence |
+
+
+The CNN assigns every cell a class. `unknown` catches areas the map hasn't resolved cleanly yet.
+
+### Architecture
+
+Fully convolutional — no pooling. Input and output stay the same spatial resolution because this is per-cell labeling, not classification.
+
+```
+Input (1, 80, 100)
+→ Conv2d(1→16,  kernel=3) + BatchNorm + ReLU
+→ Conv2d(16→32, kernel=3) + BatchNorm + ReLU
+→ Conv2d(32→64, kernel=3) + BatchNorm + ReLU
+→ Conv2d(64→32, kernel=3) + BatchNorm + ReLU   # decoder
+→ Conv2d(32→16, kernel=3) + BatchNorm + ReLU
+→ Conv2d(16→6,  kernel=1)                       # logits
+Output (6, 80, 100)
+```
+
+Each `Conv2d` slides a 3×3 window across the grid. A `Conv2d(1→16)` reads the occupancy grid and produces 16 filtered versions of it — each filter learns to detect something different: edges, corners, density blobs, gradients. `BatchNorm` normalizes activations after each conv layer so values don't explode or vanish during training. `ReLU` (`max(0, x)`) kills negatives and adds non-linearity.
+
+~47k parameters total. Trains in minutes on CPU.
+
+### Loss
+
+Weighted cross entropy per cell. Most of the grid is empty, so rare classes get upweighted:
+
+```
+empty: 0.5 | wall: 2.0 | furniture: 3.0 | person_torso: 8.0 | person_head: 12.0 | unknown: 1.0
+```
+
+Person head and torso are the hardest to detect and the most important — they get the highest weight.
+
+### Training Data
+
+Maps must come from the **trained RL agent**, not random chirps. Random probing produces a different map texture than the agent's learned sweep patterns — frequency ranges, directions, and focus areas the CNN would never see at runtime.
+
+Pipeline:
+
+1. Generate random rooms (objects + people placed randomly)
+2. Run the trained RL agent for ~50 steps and collect the occupancy map it built
+3. Ground truth labels come from known room geometry (`build_label_map`)
+4. Train the CNN on agent-built map ↔ label pairs
+5. Augment training maps — random flips, rotations, and noise — so the CNN generalizes layout, not memorizes it
+
+### Run
+
+```bash
+# train RL first, then CNN
+uv run python main.py
+uv run python -m src.agent.train_cnn
+```
+
+Checkpoints save to `checkpoints/cnn/best_model.pt`.
+
+---
+
