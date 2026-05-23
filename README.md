@@ -74,7 +74,6 @@ A random agent scores around `-0.26` per step. A trained agent should push towar
 
 The RL occupancy map is raw signal — a fine-grained accumulation of what echoes returned, cell by cell. It tells you *something* is probably here, but not *what* it is. The CNN is the translation layer: it reads that map and produces a semantic visual the viewer can actually understand.
 
-For people watching the software run, this is what turns the agent's internal belief into walls, furniture, and people on screen.
 
 ### Input
 
