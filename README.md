@@ -144,8 +144,8 @@ Pipeline:
 
 | Phase | What happens | Time |
 | ----- | ------------ | ---- |
-| **1. Cache generation** | Run RL agent on 10k rooms, save maps to `data/cnn_cache/` | ~hours once (parallelized) |
-| **2. CNN training** | Read cached maps from disk, train 20 epochs | ~minutes |
+| **1. Cache generation** | Run RL agent on 10k rooms, save maps to `data/cnn_cache/` | **~40–60 hours** at 2 workers on CPU (~20s/room × 10.5k rooms). Runs once, resumes if interrupted. |
+| **2. CNN training** | Read cached maps from disk, train 20 epochs | **~20–30 min** |
 
 Generating maps inside the training loop was the bug — each batch was re-running 16 full echo simulations. Cache once, train many times.
 

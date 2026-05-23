@@ -88,6 +88,22 @@ def cache_is_valid(meta_path: str, expected: dict, occ_path: str, lab_path: str)
     )
 
 
+def estimate_cache_seconds(n_samples: int, gen_workers: int, seconds_per_room: float = 40.0) -> float:
+    workers = max(1, gen_workers)
+    return n_samples * seconds_per_room / workers
+
+
+def _incomplete_indices(occ_path: str, n_samples: int) -> list[int]:
+    if not os.path.exists(occ_path):
+        return list(range(n_samples))
+
+    occ = np.load(occ_path, mmap_mode="r")
+    if occ.shape != (n_samples, MAP_ROWS, MAP_COLS):
+        return list(range(n_samples))
+
+    return [i for i in range(n_samples) if float(occ[i].sum()) <= 0.0]
+
+
 def build_split_cache(
     split: str,
     n_samples: int,
@@ -105,25 +121,50 @@ def build_split_cache(
         return occ_path, lab_path
 
     os.makedirs(split_dir, exist_ok=True)
-    tqdm.write(
-        f"generating {split} cache: {n_samples} rooms x {n_steps} RL steps "
-        f"({gen_workers} workers). This runs once, then training is fast."
+
+    if force:
+        for path in (occ_path, lab_path, meta_path):
+            if os.path.exists(path):
+                os.remove(path)
+
+    resume = (
+        not force
+        and os.path.exists(occ_path)
+        and os.path.exists(lab_path)
+        and np.load(occ_path, mmap_mode="r").shape == (n_samples, MAP_ROWS, MAP_COLS)
     )
+    memmap_mode = "r+" if resume else "w+"
 
     occupancy = np.lib.format.open_memmap(
         occ_path,
-        mode="w+",
+        mode=memmap_mode,
         dtype=np.float32,
         shape=(n_samples, MAP_ROWS, MAP_COLS),
     )
     labels = np.lib.format.open_memmap(
         lab_path,
-        mode="w+",
+        mode=memmap_mode,
         dtype=np.int64,
         shape=(n_samples, MAP_ROWS, MAP_COLS),
     )
 
-    seeds = [seed_start + i for i in range(n_samples)]
+    pending = _incomplete_indices(occ_path, n_samples)
+    done_count = n_samples - len(pending)
+
+    if not pending:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(expected, f, indent=2)
+        tqdm.write(f"{split} cache already complete ({n_samples} samples) -> {split_dir}")
+        return occ_path, lab_path
+
+    est = estimate_cache_seconds(len(pending), gen_workers)
+    tqdm.write(
+        f"generating {split} cache: {len(pending)} rooms remaining "
+        f"({done_count}/{n_samples} done, {n_steps} RL steps/room, {gen_workers} workers)"
+    )
+    tqdm.write(f"estimated time for this split: ~{fmt_seconds(est)} (~40s/room on CPU)")
+
+    seeds = [seed_start + idx for idx in pending]
     start = time.time()
 
     with ProcessPoolExecutor(
@@ -133,10 +174,10 @@ def build_split_cache(
     ) as pool:
         futures = {
             pool.submit(_generate_cache_sample, seed, n_steps): idx
-            for idx, seed in enumerate(seeds)
+            for idx, seed in zip(pending, seeds)
         }
 
-        progress = tqdm(total=n_samples, desc=f"generate {split}", unit="room")
+        progress = tqdm(total=len(pending), desc=f"generate {split}", unit="room")
         for future in as_completed(futures):
             idx = futures[future]
             occ, lab = future.result()
@@ -146,7 +187,7 @@ def build_split_cache(
             elapsed = time.time() - start
             done = progress.n
             if done:
-                eta = elapsed / done * (n_samples - done)
+                eta = elapsed / done * (len(pending) - done)
                 progress.set_postfix(elapsed=fmt_seconds(elapsed), eta=fmt_seconds(eta))
         progress.close()
 
