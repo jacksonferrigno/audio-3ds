@@ -74,6 +74,7 @@ A random agent scores around `-0.26` per step. A trained agent should push towar
 
 The RL occupancy map is raw signal — a fine-grained accumulation of what echoes returned, cell by cell. It tells you *something* is probably here, but not *what* it is. The CNN is the translation layer: it reads that map and produces a semantic visual the viewer can actually understand.
 
+For people watching the software run, this is what turns the agent's internal belief into walls, furniture, and people on screen.
 
 ### Input
 
@@ -139,15 +140,30 @@ Pipeline:
 4. Train the CNN on agent-built map ↔ label pairs
 5. Augment training maps — random flips, 180° rotation, and noise — so the CNN generalizes layout, not memorizes it
 
+**Two phases — don't skip this:**
+
+| Phase | What happens | Time |
+| ----- | ------------ | ---- |
+| **1. Cache generation** | Run RL agent on 10k rooms, save maps to `data/cnn_cache/` | ~hours once (parallelized) |
+| **2. CNN training** | Read cached maps from disk, train 20 epochs | ~minutes |
+
+Generating maps inside the training loop was the bug — each batch was re-running 16 full echo simulations. Cache once, train many times.
+
 ### Run
 
 ```bash
 # train RL first, then CNN
 uv run python main.py
+uv run python -m src.agent.cnn
+
+# or legacy entry point
 uv run python -m src.agent.train_cnn
+
+# optional: force rebuild cache (defaults to 2 parallel workers)
+uv run python -m src.agent.cnn --regenerate-cache --gen-workers 2
 ```
 
-Checkpoints save to `checkpoints/cnn/best_model.pt`.
+Checkpoints save to `checkpoints/cnn/best_model.pt`. Cached datasets live in `data/cnn_cache/`.
 
 ---
 
