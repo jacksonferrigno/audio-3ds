@@ -16,13 +16,13 @@ from tqdm import tqdm
 
 from src.agent.cnn.config import MAX_OBJECTS, MAX_PEOPLE
 from src.agent.cnn.rooms import make_random_room
-from src.env.echo_env import EchoEnv
+from src.env.echo_env import DEFAULT_MAX_STEPS, EchoEnv
 
 # --- training config ---
 TOTAL_TIMESTEPS = 100_000
 MOVING_PEOPLE_AFTER = 50_000
 N_ENVS = 4
-MAX_STEPS = 125
+MAX_STEPS = DEFAULT_MAX_STEPS
 CHECKPOINT_FREQ = 5_000
 EVAL_FREQ = 2_500
 EVAL_EPISODES = 10

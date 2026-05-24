@@ -15,6 +15,7 @@ from src.sim.acoustic import (
 )
 
 MAP_RESOLUTION = 0.1  # meters per grid cell
+DEFAULT_MAX_STEPS = 125
 
 def _action_params(action: np.ndarray) -> tuple[float, float, float, float, int]:
     f_start = float(np.interp(action[0], [0, 1], [500, 4000]))
@@ -33,7 +34,7 @@ class EchoEnv(gym.Env):
     def __init__(
         self,
         room: Room = None,
-        max_steps: int = 50,
+        max_steps: int = DEFAULT_MAX_STEPS,
         n_features: int = 64,
     ):
         super().__init__()
