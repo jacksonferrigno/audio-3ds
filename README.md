@@ -17,15 +17,15 @@ Rather than simulating every air molecule, we approx this pressure as a bundle o
 The agent's job is to find what it hasn't seen yet. At each step it controls four continuous values, all normalized 0-1 and scaled to real physical values internally:
 
 
-| Action         | Range         | What it does                                      |
-| -------------- | ------------- | ------------------------------------------------- |
-| `f_start`      | 500–4000 Hz   | Chirp start frequency                             |
-| `f_end`        | 4000–16000 Hz | Chirp end frequency                               |
-| `direction`    | 0–2π          | Center direction of the chirp cone                |
-| `sweep_width`  | 15°–180°      | Angular width of the cone (π/12 to π radians)     |
+| Action        | Range         | What it does                                  |
+| ------------- | ------------- | --------------------------------------------- |
+| `f_start`     | 500–4000 Hz   | Chirp start frequency                         |
+| `f_end`       | 4000–16000 Hz | Chirp end frequency                           |
+| `direction`   | 0–2π          | Center direction of the chirp cone            |
+| `sweep_width` | 15°–180°      | Angular width of the cone (π/12 to π radians) |
+
 
 Ray count scales with sweep width (~30–180 rays). Rays are cast only inside the cone defined by `direction` and `sweep_width` — not a full 360° blast every ping.
-
 
 Cranking up the frequency range means looking harder for detail — high frequency chirps resolve finer geometry at shorter range. Early in an episode the agent tends toward wide low-frequency sweeps to build a rough map. Later it narrows in on fuzzy areas with high frequency focused pulses. That transition is learned, not programmed.
 
@@ -133,39 +133,3 @@ Person head and torso are the hardest to detect and the most important — they 
 ### Training Data
 
 Maps must come from the **trained RL agent**, not random chirps. Random probing produces a different map texture than the agent's learned sweep patterns — frequency ranges, directions, and focus areas the CNN would never see at runtime.
-
-Pipeline:
-
-1. Generate random rooms (objects + people placed randomly)
-2. Run the trained RL agent for ~50 steps and collect the occupancy map it built
-3. Ground truth labels come from known room geometry (`build_label_map`)
-4. Train the CNN on agent-built map ↔ label pairs
-5. Augment training maps — random flips, 180° rotation, and noise — so the CNN generalizes layout, not memorizes it
-
-**Two phases — don't skip this:**
-
-| Phase | What happens | Time |
-| ----- | ------------ | ---- |
-| **1. Cache generation** | Run RL agent on 10k rooms, save maps to `data/cnn_cache/` | **~40–60 hours** at 2 workers on CPU (~20s/room × 10.5k rooms). Runs once, resumes if interrupted. |
-| **2. CNN training** | Read cached maps from disk, train 20 epochs | **~20–30 min** |
-
-Generating maps inside the training loop was the bug — each batch was re-running 16 full echo simulations. Cache once, train many times.
-
-### Run
-
-```bash
-# train RL first, then CNN
-uv run python main.py
-uv run python -m src.agent.cnn
-
-# or legacy entry point
-uv run python -m src.agent.train_cnn
-
-# optional: force rebuild cache (defaults to 2 parallel workers)
-uv run python -m src.agent.cnn --regenerate-cache --gen-workers 2
-```
-
-Checkpoints save to `checkpoints/cnn/best_model.pt`. Cached datasets live in `data/cnn_cache/`.
-
----
-
