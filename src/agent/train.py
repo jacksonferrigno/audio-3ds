@@ -1,95 +1,96 @@
 # src/agent/train.py
-import re
+import os
+
 import numpy as np
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CallbackList,
     CheckpointCallback,
     EvalCallback,
-    BaseCallback,
 )
+from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
+from tqdm import tqdm
+
+from src.agent.cnn.config import MAX_OBJECTS, MAX_PEOPLE
+from src.agent.cnn.rooms import make_random_room
 from src.env.echo_env import EchoEnv
-from src.sim.room import Room, Object, Person
-import os
 
 # --- training config ---
-TOTAL_TIMESTEPS  = 100_000
-N_ENVS           = 4          # parallel envs, speeds up data collection
-MAX_STEPS        = 50         # steps per episode
-CHECKPOINT_FREQ  = 5_000      # save model every N steps
-EVAL_FREQ        = 2_500      # evaluate every N steps
-EVAL_EPISODES    = 10         # episodes per evaluation
-DEFAULT_RESUME_CHECKPOINT = "checkpoints/phase_1_120000_steps.zip"
-EPISODE_MEAN_WINDOW = 10      # episodes averaged for metrics + phase advancement
+TOTAL_TIMESTEPS = 100_000
+MOVING_PEOPLE_AFTER = 50_000
+N_ENVS = 4
+MAX_STEPS = 50
+CHECKPOINT_FREQ = 5_000
+EVAL_FREQ = 2_500
+EVAL_EPISODES = 10
+DEFAULT_RESUME_CHECKPOINT = "checkpoints/best_model/best_model.zip"
+EPISODE_MEAN_WINDOW = 10
 
 # --- PPO hyperparams ---
-LEARNING_RATE    = 3e-4
-N_STEPS          = 64       # steps per PPO update (64 * N_ENVS must divide BATCH_SIZE)
-BATCH_SIZE       = 64
-N_EPOCHS         = 10
-GAMMA            = 0.99       # discount factor
-GAE_LAMBDA       = 0.95       # generalized advantage estimation
-CLIP_RANGE       = 0.2        # PPO clip
+LEARNING_RATE = 3e-4
+N_STEPS = 64
+BATCH_SIZE = 64
+N_EPOCHS = 10
+GAMMA = 0.99
+GAE_LAMBDA = 0.95
+CLIP_RANGE = 0.2
 
-# --- curriculum thresholds ---
-# mean reward needed to unlock next phase (kept low — phases differ by room complexity)
-PHASE_THRESHOLDS = [0.1, 0.2, 0.3]
+LOG_DIR = "runs/ppo_echo"
+CHECKPOINT_DIR = "checkpoints/"
+BEST_MODEL_PATH = "checkpoints/best_model"
 
-# --- paths ---
-LOG_DIR          = "runs/ppo_echo"
-CHECKPOINT_DIR   = "checkpoints/"
-BEST_MODEL_PATH  = "checkpoints/best_model"
 
-CHECKPOINT_STEP_PATTERN = re.compile(r"phase_(\d+)_(\d+)_steps\.zip$")
-CHECKPOINT_MODEL_PATTERN = re.compile(r"phase_(\d+)_model\.zip$")
+def make_env():
+    """Random room each episode — objects + 0-N static people."""
 
-def make_env(phase: int = 1):
-    """
-    Factory function that returns an env constructor for a given curriculum phase.
-    stable-baselines3 needs a callable, not an env instance directly.
-    """
     def _init():
-        room = Room(width=10.0, height=8.0)
-
-        # scale complexity with phase
-        max_objects = phase * 2
-        max_people = phase
-
-        n_objects = np.random.randint(0, max_objects + 1)
-        n_people = np.random.randint(0, max_people + 1)
-
-        for i in range(n_objects):
-            room.add_object(Object(
-                position=[
-                    np.random.uniform(1, 9),
-                    np.random.uniform(1, 7),
-                ],
-                width=np.random.uniform(0.3, 2.0),
-                height=np.random.uniform(0.3, 2.0),
-                label=f"object_{i}",
-            ))
-
-        for i in range(n_people):
-            room.add_person(Person(
-                position=[
-                    np.random.uniform(1, 9),
-                    np.random.uniform(1, 7),
-                ],
-                facing=np.random.uniform(0, 2 * np.pi),
-                label=f"person_{i}",
-            ))
-
+        room = make_random_room(max_objects=MAX_OBJECTS, max_people=MAX_PEOPLE)
         return EchoEnv(room=room, max_steps=MAX_STEPS)
 
     return _init
 
+
+class TqdmCallback(BaseCallback):
+    """Progress bar for the current learn() run."""
+
+    def __init__(self, total_timesteps: int):
+        super().__init__()
+        self.total_timesteps = total_timesteps
+        self.pbar: tqdm | None = None
+        self._start_steps = 0
+
+    def _on_training_start(self) -> None:
+        self._start_steps = self.num_timesteps
+        target = self._start_steps + self.total_timesteps
+        self.pbar = tqdm(
+            total=target,
+            initial=self._start_steps,
+            unit="step",
+            desc="PPO train",
+            dynamic_ncols=True,
+        )
+
+    def _on_step(self) -> bool:
+        if self.pbar is not None:
+            self.pbar.n = self.num_timesteps
+            info = self.locals["infos"][0]
+            if self.locals["dones"][0]:
+                self.pbar.set_postfix(
+                    reward=f"{info.get('map_coverage', 0):.2f} cov",
+                    moving=info.get("moving_people", False),
+                )
+            self.pbar.refresh()
+        return True
+
+    def _on_training_end(self) -> None:
+        if self.pbar is not None:
+            self.pbar.close()
+
+
 class EchoTensorBoardCallback(BaseCallback):
-    """
-    Logs custom metrics to TensorBoard at each step.
-    Run tensorboard --logdir runs/ to watch live.
-    """
     def __init__(self, verbose: int = 0):
         super().__init__(verbose)
         self.episode_rewards = []
@@ -97,19 +98,16 @@ class EchoTensorBoardCallback(BaseCallback):
         self.current_episode_reward = 0.0
 
     def _on_step(self) -> bool:
-        # accumulate reward
         self.current_episode_reward += float(self.locals["rewards"][0])
-
-        # pull info dict from the env
         info = self.locals["infos"][0]
 
-        # log per-step metrics
         self.logger.record("echo/map_coverage", info.get("map_coverage", 0))
         self.logger.record("echo/f_start", info.get("f_start", 0))
         self.logger.record("echo/f_end", info.get("f_end", 0))
-        self.logger.record("echo/step", info.get("step", 0))
+        self.logger.record("echo/direction", info.get("direction", 0))
+        self.logger.record("echo/sweep_width", info.get("sweep_width", 0))
+        self.logger.record("echo/moving_people", float(info.get("moving_people", False)))
 
-        # log episode reward on episode end
         if self.locals["dones"][0]:
             self.episode_rewards.append(self.current_episode_reward)
             self.episode_coverages.append(info.get("map_coverage", 0))
@@ -128,73 +126,41 @@ class EchoTensorBoardCallback(BaseCallback):
         return True
 
 
-def parse_checkpoint(path: str) -> tuple[int, int | None]:
-    """Return (phase, steps) parsed from a checkpoint filename."""
-    name = os.path.basename(path)
-    step_match = CHECKPOINT_STEP_PATTERN.match(name)
-    if step_match:
-        return int(step_match.group(1)), int(step_match.group(2))
+class MovingPeopleCallback(BaseCallback):
+    """After N global steps, people drift slightly each env step."""
 
-    model_match = CHECKPOINT_MODEL_PATTERN.match(name)
-    if model_match:
-        return int(model_match.group(1)), None
+    def __init__(self, enable_after: int = MOVING_PEOPLE_AFTER, verbose: int = 0):
+        super().__init__(verbose)
+        self.enable_after = enable_after
+        self._enabled = False
 
-    raise ValueError(f"unrecognized checkpoint filename: {name}")
-
-
-def find_latest_checkpoint(checkpoint_dir: str = CHECKPOINT_DIR) -> str | None:
-    """Find the newest periodic checkpoint in the checkpoint directory."""
-    if not os.path.isdir(checkpoint_dir):
-        return None
-
-    latest_path = None
-    latest_steps = -1
-
-    for name in os.listdir(checkpoint_dir):
-        match = CHECKPOINT_STEP_PATTERN.match(name)
-        if not match:
-            continue
-        steps = int(match.group(2))
-        if steps > latest_steps:
-            latest_steps = steps
-            latest_path = os.path.join(checkpoint_dir, name)
-
-    return latest_path
+    def _on_step(self) -> bool:
+        if not self._enabled and self.num_timesteps >= self.enable_after:
+            self.training_env.env_method("set_moving_people", True)
+            self._enabled = True
+            if self.verbose:
+                print(f"moving people enabled at step {self.num_timesteps}")
+        return True
 
 
 def resolve_resume_checkpoint(resume_from: str | None) -> str | None:
     if resume_from == "":
         return None
-    if resume_from:
-        path = resume_from
-    elif os.path.exists(DEFAULT_RESUME_CHECKPOINT):
-        path = DEFAULT_RESUME_CHECKPOINT
-    else:
-        path = find_latest_checkpoint()
-
-    if not path:
+    if resume_from is None:
+        if os.path.exists(DEFAULT_RESUME_CHECKPOINT):
+            return DEFAULT_RESUME_CHECKPOINT
         return None
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"checkpoint not found: {path}")
-    return path
+    if not os.path.exists(resume_from):
+        raise FileNotFoundError(f"checkpoint not found: {resume_from}")
+    return resume_from
 
 
-def load_or_create_model(vec_env, current_phase: int, checkpoint_path: str | None):
-    model_path = f"{CHECKPOINT_DIR}phase_{current_phase}_model"
-
+def load_or_create_model(vec_env, checkpoint_path: str | None):
     if checkpoint_path:
         print(f"loading checkpoint: {checkpoint_path}")
         return PPO.load(checkpoint_path, env=vec_env)
 
-    if os.path.exists(f"{model_path}.zip"):
-        print(f"loading phase {current_phase} weights...")
-        return PPO.load(model_path, env=vec_env)
-
-    if current_phase > 1 and os.path.exists(f"{CHECKPOINT_DIR}phase_{current_phase - 1}_model.zip"):
-        print(f"loading phase {current_phase - 1} weights...")
-        return PPO.load(f"{CHECKPOINT_DIR}phase_{current_phase - 1}_model", env=vec_env)
-
-    print(f"starting fresh model for phase {current_phase}")
+    print("starting fresh PPO model")
     return PPO(
         policy="MlpPolicy",
         env=vec_env,
@@ -210,80 +176,56 @@ def load_or_create_model(vec_env, current_phase: int, checkpoint_path: str | Non
     )
 
 
-def train(resume_from: str | None = DEFAULT_RESUME_CHECKPOINT):
+def train(resume_from: str | None = None):
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(LOG_DIR, exist_ok=True)
 
     resume_checkpoint = resolve_resume_checkpoint(resume_from)
-    current_phase = 1
-    pending_checkpoint = None
-
     if resume_checkpoint:
-        current_phase, _ = parse_checkpoint(resume_checkpoint)
-        pending_checkpoint = resume_checkpoint
-        print(f"resuming from phase {current_phase}: {resume_checkpoint}")
+        print(f"resuming from: {resume_checkpoint}")
+    else:
+        print("no checkpoint found — starting fresh")
 
-    total_steps_trained = 0
+    vec_env = make_vec_env(make_env(), n_envs=N_ENVS)
+    model = load_or_create_model(vec_env, resume_checkpoint)
+    model.set_logger(configure(LOG_DIR, ["stdout", "tensorboard"]))
 
-    while current_phase <= 4:
-        print(f"\n--- phase {current_phase} ---")
+    print(f"tensorboard: tensorboard --logdir {LOG_DIR}")
 
-        vec_env = make_vec_env(
-            make_env(phase=current_phase),
-            n_envs=N_ENVS,
-        )
-
-        model = load_or_create_model(vec_env, current_phase, pending_checkpoint)
-        pending_checkpoint = None
-        model.set_logger(configure(LOG_DIR, ["tensorboard"]))
-
-        checkpoint_cb = CheckpointCallback(
+    eval_env = make_vec_env(make_env(), n_envs=1)
+    callbacks = CallbackList([
+        TqdmCallback(total_timesteps=TOTAL_TIMESTEPS),
+        CheckpointCallback(
             save_freq=CHECKPOINT_FREQ,
             save_path=CHECKPOINT_DIR,
-            name_prefix=f"phase_{current_phase}",
-        )
-
-        eval_env = make_vec_env(make_env(phase=current_phase), n_envs=1)
-        eval_cb = EvalCallback(
+            name_prefix="echo",
+        ),
+        EvalCallback(
             eval_env,
             best_model_save_path=BEST_MODEL_PATH,
             log_path=LOG_DIR,
             eval_freq=EVAL_FREQ,
             n_eval_episodes=EVAL_EPISODES,
             deterministic=True,
-        )
+        ),
+        EchoTensorBoardCallback(),
+        MovingPeopleCallback(enable_after=MOVING_PEOPLE_AFTER, verbose=1),
+    ])
 
-        tensorboard_cb = EchoTensorBoardCallback()
+    model.learn(
+        total_timesteps=TOTAL_TIMESTEPS,
+        callback=callbacks,
+        reset_num_timesteps=resume_checkpoint is None,
+        progress_bar=False,
+    )
 
-        model.learn(
-            total_timesteps=TOTAL_TIMESTEPS,
-            callback=[checkpoint_cb, eval_cb, tensorboard_cb],
-            reset_num_timesteps=False,
-        )
+    final_path = f"{CHECKPOINT_DIR}echo_final"
+    model.save(final_path)
+    print(f"training complete — saved to {final_path}")
 
-        total_steps_trained += TOTAL_TIMESTEPS
-
-        model_path = f"{CHECKPOINT_DIR}phase_{current_phase}_model"
-        model.save(model_path)
-        print(f"phase {current_phase} saved to {model_path}")
-
-        if len(tensorboard_cb.episode_rewards) >= EPISODE_MEAN_WINDOW:
-            mean_reward = np.mean(tensorboard_cb.episode_rewards[-EPISODE_MEAN_WINDOW:])
-            threshold = PHASE_THRESHOLDS[current_phase - 1] if current_phase <= len(PHASE_THRESHOLDS) else 0
-            print(f"mean reward: {mean_reward:.3f} | threshold: {threshold:.3f}")
-            if mean_reward >= threshold or current_phase == 4:
-                current_phase += 1
-            else:
-                print(f"threshold not met, retraining phase {current_phase}")
-        else:
-            current_phase += 1
-
-        vec_env.close()
-        eval_env.close()
-
-    print(f"\ntraining complete. total steps: {total_steps_trained}")
+    vec_env.close()
+    eval_env.close()
 
 
 if __name__ == "__main__":
     train()
-    

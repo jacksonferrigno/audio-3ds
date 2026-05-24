@@ -3,7 +3,8 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from src.sim.room import Room, make_default_room
-from src.sim.ray import cast_sweep
+from src.sim.ray import cast_sweep, cast_sweep_first_hits
+from src.sim.people_motion import tick_people
 from src.sim.acoustic import (
     generate_chirp,
     build_echo_signal,
@@ -14,6 +15,19 @@ from src.sim.acoustic import (
 )
 
 MAP_RESOLUTION = 0.1  # meters per grid cell
+
+def _action_params(action: np.ndarray) -> tuple[float, float, float, float, int]:
+    f_start = float(np.interp(action[0], [0, 1], [500, 4000]))
+    f_end = float(np.interp(action[1], [0, 1], [4000, 16000]))
+    direction = float(np.interp(action[2], [0, 1], [0, 2 * np.pi]))
+    sweep_width = float(np.interp(action[3], [0, 1], [np.pi / 12, np.pi]))
+    n_rays = max(30, int(30 + (sweep_width / np.pi) * 150))
+
+    if f_end <= f_start:
+        f_end = f_start + 500.0
+
+    return f_start, f_end, direction, sweep_width, n_rays
+
 
 class EchoEnv(gym.Env):
     def __init__(
@@ -26,6 +40,7 @@ class EchoEnv(gym.Env):
         self.room = room or make_default_room()
         self.max_steps = max_steps
         self.n_features = n_features
+        self.moving_people = False
 
         # map dimensions
         self.map_cols = int(self.room.width / MAP_RESOLUTION)
@@ -54,6 +69,10 @@ class EchoEnv(gym.Env):
         self._prev_occupancy_map = self.occupancy_map.copy()
         self.current_step = 0
         self.emitter_pos = self.room.random_position()
+        self.last_hit_points: list = []
+
+    def set_moving_people(self, enabled: bool) -> None:
+        self.moving_people = enabled
 
     def reset(
         self,
@@ -79,15 +98,10 @@ class EchoEnv(gym.Env):
     def step(self, action: np.ndarray):
         self.current_step += 1
 
-        # scale normalized actions to real values
-        f_start = float(np.interp(action[0], [0, 1], [500, 4000]))
-        f_end = float(np.interp(action[1], [0, 1], [4000, 16000]))
-        direction = float(np.interp(action[2], [0, 1], [0, 2 * np.pi]))
-        n_rays = int(np.interp(action[3], [0, 1], [30, 360]))
+        f_start, f_end, direction, sweep_width, n_rays = _action_params(action)
 
-        # ensure f_end > f_start
-        if f_end <= f_start:
-            f_end = f_start + 500.0
+        if self.moving_people and self.room.people:
+            tick_people(self.room, self.np_random)
 
         # get observation from this action
         obs = self._get_observation(action)
@@ -104,28 +118,33 @@ class EchoEnv(gym.Env):
             "f_start": f_start,
             "f_end": f_end,
             "direction": direction,
+            "sweep_width": sweep_width,
             "n_rays": n_rays,
             "map_coverage": float(self.occupancy_map.mean()),
+            "moving_people": self.moving_people,
         }
 
         return obs.agent_input, reward, terminated, truncated, info
 
 
     def _get_observation(self, action: np.ndarray) -> EchoObservation:
-        # scale action to real values
-        f_start = float(np.interp(action[0], [0, 1], [500, 4000]))
-        f_end   = float(np.interp(action[1], [0, 1], [4000, 16000]))
-        n_rays  = int(np.interp(action[3],   [0, 1], [30, 360]))
-
-        if f_end <= f_start:
-            f_end = f_start + 500.0
+        f_start, f_end, direction, sweep_width, n_rays = _action_params(action)
 
         # generate the chirp and cast rays
         emitted_chirp = generate_chirp(f_start, f_end)
+        self.last_hit_points = cast_sweep_first_hits(
+            self.room,
+            self.emitter_pos,
+            direction=direction,
+            sweep_width=sweep_width,
+            n_rays=n_rays,
+        )
         echoes = cast_sweep(
             self.room,
             self.emitter_pos,
             self.emitter_pos,  # mic co-located with emitter for now
+            direction=direction,
+            sweep_width=sweep_width,
             n_rays=n_rays,
         )
 
@@ -179,11 +198,4 @@ class EchoEnv(gym.Env):
         return float(reward)
 
     def render(self):
-        # plugs into visualizer.py later
-        # will show:
-        # - dark room with wall outlines
-        # - occupancy map as glowing heatmap
-        # - agent emitter position
-        # - chirp direction as animated beam
-        # - speech waves from person mouth points
         pass

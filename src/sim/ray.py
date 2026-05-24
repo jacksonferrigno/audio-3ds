@@ -172,31 +172,59 @@ class Ray:
             total_distance=total_dist,
         )
 
+    def first_hit(self, room: Room) -> Optional[Hit]:
+        """First surface intersection along this ray."""
+        return self._find_closest_hit(self.origin, self.direction, room.all_walls)
+
+
+def _sweep_angles(direction: float, sweep_width: float, n_rays: int) -> np.ndarray:
+    if n_rays <= 1:
+        return np.array([direction], dtype=float)
+    half = sweep_width / 2
+    return np.linspace(direction - half, direction + half, n_rays, endpoint=False)
+
+
+def cast_sweep_first_hits(
+    room: Room,
+    emitter_position: np.ndarray,
+    direction: float = 0.0,
+    sweep_width: float = 2 * np.pi,
+    n_rays: int = 360,
+) -> list[np.ndarray]:
+    """First-bounce hit points inside the chirp sweep cone."""
+    hits: list[np.ndarray] = []
+    for angle in _sweep_angles(direction, sweep_width, n_rays):
+        ray = Ray(origin=emitter_position, angle=float(angle))
+        hit = ray.first_hit(room)
+        if hit is not None:
+            hits.append(hit.point.copy())
+
+    return hits
+
 
 def cast_sweep(
     room: Room,
     emitter_position: np.ndarray,
     mic_position: np.ndarray,
+    direction: float = 0.0,
+    sweep_width: float = 2 * np.pi,
     n_rays: int = 360,
     max_bounces: int = 5,
 ) -> list[EchoEvent]:
     """
-    Emit a full sweep of rays in all directions and collect all echoes.
-    This is the full chirp emission from one timestep.
+    Emit rays inside a directional sweep and collect echoes.
     """
     all_echoes = []
-    angles = np.linspace(0, 2 * np.pi, n_rays, endpoint=False)
 
-    for angle in angles:
+    for angle in _sweep_angles(direction, sweep_width, n_rays):
         ray = Ray(
             origin=emitter_position,
-            angle=angle,
+            angle=float(angle),
             energy=1.0,
             max_bounces=max_bounces,
         )
         echoes = ray.cast(room, mic_position)
         all_echoes.extend(echoes)
 
-    # sort by time of flight
     all_echoes.sort(key=lambda e: e.time_of_flight)
     return all_echoes

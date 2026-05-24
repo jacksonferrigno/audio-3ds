@@ -6,7 +6,7 @@
 
 Sounds propagtes as a pressure wave - compressed air molecules pushing into neighboring molecultes, radiating outwards in all directions from the source. When this wave hits a surface, it tells us about the object. Hard flat surfaces reflect cleanly. Soft material absorbs more.
 
-Rather than simulating every air molecule, we approx this pressure as a bundle of 360 rays emitted simultaneously in all directions -- pulse. Each ray travels in a straight line, bouncing off surfaces and losing energy at each bounce based on material absorption. either a ray comes back or it doesnt. 
+Rather than simulating every air molecule, we approx this pressure as a bundle of rays emitted in a directional cone each pulse. Each ray travels in a straight line, bouncing off surfaces and losing energy at each bounce based on material absorption. either a ray comes back or it doesnt. 
 
 ## RL
 
@@ -17,12 +17,14 @@ Rather than simulating every air molecule, we approx this pressure as a bundle o
 The agent's job is to find what it hasn't seen yet. At each step it controls four continuous values, all normalized 0-1 and scaled to real physical values internally:
 
 
-| Action      | Range         | What it does             |
-| ----------- | ------------- | ------------------------ |
-| `f_start`   | 500–4000 Hz   | Chirp start frequency    |
-| `f_end`     | 4000–16000 Hz | Chirp end frequency      |
-| `direction` | 0–2π          | Where to point the sweep |
-| `n_rays`    | 30–360        | How wide to fan out      |
+| Action         | Range         | What it does                                      |
+| -------------- | ------------- | ------------------------------------------------- |
+| `f_start`      | 500–4000 Hz   | Chirp start frequency                             |
+| `f_end`        | 4000–16000 Hz | Chirp end frequency                               |
+| `direction`    | 0–2π          | Center direction of the chirp cone                |
+| `sweep_width`  | 15°–180°      | Angular width of the cone (π/12 to π radians)     |
+
+Ray count scales with sweep width (~30–180 rays). Rays are cast only inside the cone defined by `direction` and `sweep_width` — not a full 360° blast every ping.
 
 
 Cranking up the frequency range means looking harder for detail — high frequency chirps resolve finer geometry at shorter range. Early in an episode the agent tends toward wide low-frequency sweeps to build a rough map. Later it narrows in on fuzzy areas with high frequency focused pulses. That transition is learned, not programmed.
