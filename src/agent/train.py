@@ -1,5 +1,5 @@
 # src/agent/train.py
-import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -18,15 +18,18 @@ from src.agent.cnn.config import MAX_OBJECTS, MAX_PEOPLE
 from src.agent.cnn.rooms import make_random_room
 from src.env.echo_env import DEFAULT_MAX_STEPS, EchoEnv
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 # --- training config ---
 TOTAL_TIMESTEPS = 100_000
-MOVING_PEOPLE_AFTER = 50_000
+MOVING_PEOPLE_AFTER: int | None = None  # off for now; set e.g. 50_000 to re-enable
 N_ENVS = 4
 MAX_STEPS = DEFAULT_MAX_STEPS
 CHECKPOINT_FREQ = 5_000
 EVAL_FREQ = 2_500
 EVAL_EPISODES = 10
-DEFAULT_RESUME_CHECKPOINT = "checkpoints/best_model/best_model.zip"
+DEFAULT_RESUME_CHECKPOINT = PROJECT_ROOT / "checkpoints/best_model/best_model.zip"
+LEGACY_CHECKPOINT_DIR = PROJECT_ROOT / "src/checkpoints"
 EPISODE_MEAN_WINDOW = 10
 
 # --- PPO hyperparams ---
@@ -38,9 +41,9 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_RANGE = 0.2
 
-LOG_DIR = "runs/ppo_echo"
-CHECKPOINT_DIR = "checkpoints/"
-BEST_MODEL_PATH = "checkpoints/best_model"
+LOG_DIR = PROJECT_ROOT / "runs/ppo_echo"
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
+BEST_MODEL_PATH = PROJECT_ROOT / "checkpoints/best_model"
 
 
 def make_env():
@@ -129,12 +132,14 @@ class EchoTensorBoardCallback(BaseCallback):
 class MovingPeopleCallback(BaseCallback):
     """After N global steps, people drift slightly each env step."""
 
-    def __init__(self, enable_after: int = MOVING_PEOPLE_AFTER, verbose: int = 0):
+    def __init__(self, enable_after: int | None = MOVING_PEOPLE_AFTER, verbose: int = 0):
         super().__init__(verbose)
         self.enable_after = enable_after
         self._enabled = False
 
     def _on_step(self) -> bool:
+        if self.enable_after is None:
+            return True
         if not self._enabled and self.num_timesteps >= self.enable_after:
             self.training_env.env_method("set_moving_people", True)
             self._enabled = True
@@ -143,16 +148,48 @@ class MovingPeopleCallback(BaseCallback):
         return True
 
 
+def _latest_step_checkpoint(checkpoint_dir: Path) -> Path | None:
+    latest_path: Path | None = None
+    latest_steps = -1
+
+    if not checkpoint_dir.is_dir():
+        return None
+
+    for path in checkpoint_dir.glob("*_steps.zip"):
+        try:
+            steps = int(path.stem.removesuffix("_steps").rsplit("_", 1)[-1])
+        except ValueError:
+            continue
+        if steps > latest_steps:
+            latest_steps = steps
+            latest_path = path
+
+    return latest_path
+
+
 def resolve_resume_checkpoint(resume_from: str | None) -> str | None:
     if resume_from == "":
         return None
-    if resume_from is None:
-        if os.path.exists(DEFAULT_RESUME_CHECKPOINT):
-            return DEFAULT_RESUME_CHECKPOINT
-        return None
-    if not os.path.exists(resume_from):
-        raise FileNotFoundError(f"checkpoint not found: {resume_from}")
-    return resume_from
+
+    if resume_from is not None:
+        path = Path(resume_from)
+        if not path.exists():
+            raise FileNotFoundError(f"checkpoint not found: {resume_from}")
+        return str(path)
+
+    if DEFAULT_RESUME_CHECKPOINT.exists():
+        return str(DEFAULT_RESUME_CHECKPOINT)
+
+    latest = _latest_step_checkpoint(CHECKPOINT_DIR)
+    if latest is not None:
+        return str(latest)
+
+    legacy_latest = _latest_step_checkpoint(LEGACY_CHECKPOINT_DIR)
+    if legacy_latest is not None:
+        print(f"found legacy checkpoint: {legacy_latest}")
+        return str(legacy_latest)
+
+    return None
 
 
 def load_or_create_model(vec_env, checkpoint_path: str | None):
@@ -177,34 +214,46 @@ def load_or_create_model(vec_env, checkpoint_path: str | None):
 
 
 def train(resume_from: str | None = None):
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    BEST_MODEL_PATH.mkdir(parents=True, exist_ok=True)
 
     resume_checkpoint = resolve_resume_checkpoint(resume_from)
     if resume_checkpoint:
         print(f"resuming from: {resume_checkpoint}")
     else:
         print("no checkpoint found — starting fresh")
+    print(f"checkpoints save to: {CHECKPOINT_DIR.resolve()}")
+    if MOVING_PEOPLE_AFTER is None:
+        print("moving people: disabled")
+    else:
+        print(f"moving people: enabled after step {MOVING_PEOPLE_AFTER}")
 
     vec_env = make_vec_env(make_env(), n_envs=N_ENVS)
     model = load_or_create_model(vec_env, resume_checkpoint)
-    model.set_logger(configure(LOG_DIR, ["stdout", "tensorboard"]))
+    model.set_logger(configure(str(LOG_DIR), ["stdout", "tensorboard"]))
 
-    print(f"tensorboard: tensorboard --logdir {LOG_DIR}")
+    remaining_timesteps = TOTAL_TIMESTEPS
+    if resume_checkpoint:
+        remaining_timesteps = max(0, TOTAL_TIMESTEPS - model.num_timesteps)
+        print(f"continuing for {remaining_timesteps} steps (at {model.num_timesteps}/{TOTAL_TIMESTEPS})")
+
+    print(f"tensorboard: tensorboard --logdir {LOG_DIR.resolve()}")
 
     eval_env = make_vec_env(make_env(), n_envs=1)
     callbacks = CallbackList([
-        TqdmCallback(total_timesteps=TOTAL_TIMESTEPS),
+        TqdmCallback(total_timesteps=remaining_timesteps),
         CheckpointCallback(
-            save_freq=CHECKPOINT_FREQ,
-            save_path=CHECKPOINT_DIR,
+            # save_freq counts env.step() calls; divide by N_ENVS for real timesteps
+            save_freq=max(1, CHECKPOINT_FREQ // N_ENVS),
+            save_path=str(CHECKPOINT_DIR),
             name_prefix="echo",
         ),
         EvalCallback(
             eval_env,
-            best_model_save_path=BEST_MODEL_PATH,
-            log_path=LOG_DIR,
-            eval_freq=EVAL_FREQ,
+            best_model_save_path=str(BEST_MODEL_PATH),
+            log_path=str(LOG_DIR / "evaluations"),
+            eval_freq=max(1, EVAL_FREQ // N_ENVS),
             n_eval_episodes=EVAL_EPISODES,
             deterministic=True,
         ),
@@ -213,15 +262,15 @@ def train(resume_from: str | None = None):
     ])
 
     model.learn(
-        total_timesteps=TOTAL_TIMESTEPS,
+        total_timesteps=remaining_timesteps,
         callback=callbacks,
         reset_num_timesteps=resume_checkpoint is None,
         progress_bar=False,
     )
 
-    final_path = f"{CHECKPOINT_DIR}echo_final"
-    model.save(final_path)
-    print(f"training complete — saved to {final_path}")
+    final_path = CHECKPOINT_DIR / "echo_final"
+    model.save(str(final_path))
+    print(f"training complete — saved to {final_path.resolve()}")
 
     vec_env.close()
     eval_env.close()

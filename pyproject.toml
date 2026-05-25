@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=2.4.6",
     "pygame>=2.6.1",
     "scipy>=1.17.1",
+    "sounddevice>=0.5.5",
     "stable-baselines3>=2.8.0",
     "tensorboard>=2.20.0",
     "torch>=2.6.0",

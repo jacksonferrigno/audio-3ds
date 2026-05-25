@@ -3,7 +3,7 @@ import os
 import numpy as np
 from stable_baselines3 import PPO
 
-from src.agent.cnn.config import DEFAULT_RL_CHECKPOINT, STEPS_PER_SAMPLE
+from src.agent.cnn.config import DEFAULT_RL_CHECKPOINT, CACHE_STEPS_PER_SAMPLE, STEPS_PER_SAMPLE
 from src.env.echo_env import EchoEnv
 from src.sim.room import Room
 
@@ -23,8 +23,18 @@ def generate_occupancy_map_with_agent(
     n_steps: int = STEPS_PER_SAMPLE,
     seed: int | None = None,
     deterministic: bool = True,
+    fast: bool = False,
 ) -> np.ndarray:
     env = EchoEnv(room=room, max_steps=n_steps + 5)
+    if fast:
+        obs = env.reset_for_cache(seed=seed)
+        for _ in range(n_steps - 1):
+            action, _ = rl_model.predict(obs, deterministic=deterministic)
+            obs = env.cache_step(action)
+            if env.current_step >= env.max_steps:
+                break
+        return env.occupancy_map.copy()
+
     obs, _ = env.reset(seed=seed)
 
     for _ in range(n_steps):
@@ -34,3 +44,19 @@ def generate_occupancy_map_with_agent(
             break
 
     return env.occupancy_map.copy()
+
+
+def generate_occupancy_map_for_cache(
+    room: Room,
+    rl_model: PPO,
+    n_steps: int = CACHE_STEPS_PER_SAMPLE,
+    seed: int | None = None,
+) -> np.ndarray:
+    return generate_occupancy_map_with_agent(
+        room,
+        rl_model,
+        n_steps=n_steps,
+        seed=seed,
+        deterministic=True,
+        fast=True,
+    )

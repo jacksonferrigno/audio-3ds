@@ -31,6 +31,6 @@ class CachedEchoMapDataset(Dataset):
             rng = np.random.default_rng(self.seed + index)
             occupancy, labels = augment_sample(occupancy, labels, rng)
 
-        x = torch.from_numpy(occupancy).unsqueeze(0)
-        y = torch.from_numpy(labels)
+        x = torch.from_numpy(np.ascontiguousarray(occupancy)).unsqueeze(0)
+        y = torch.from_numpy(np.ascontiguousarray(labels))
         return x, y

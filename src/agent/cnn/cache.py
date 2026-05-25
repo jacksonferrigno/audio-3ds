@@ -9,12 +9,12 @@ from tqdm import tqdm
 
 from src.agent.cnn.config import (
     CACHE_DIR,
+    CACHE_STEPS_PER_SAMPLE,
     MAX_OBJECTS,
     MAX_PEOPLE,
-    STEPS_PER_SAMPLE,
 )
 from src.agent.cnn.rooms import make_random_room
-from src.agent.cnn.rollout import generate_occupancy_map_with_agent
+from src.agent.cnn.rollout import generate_occupancy_map_for_cache
 from src.agent.cnn.timefmt import fmt_seconds
 from src.agent.cnn_model import MAP_COLS, MAP_ROWS, build_label_map
 
@@ -32,7 +32,7 @@ def _generate_cache_sample(sample_seed: int, n_steps: int) -> tuple[np.ndarray, 
 
     rng = np.random.default_rng(sample_seed)
     room = make_random_room(rng=rng)
-    occupancy = generate_occupancy_map_with_agent(
+    occupancy = generate_occupancy_map_for_cache(
         room,
         _RL_MODEL,
         n_steps=n_steps,
@@ -77,8 +77,9 @@ def cache_is_valid(meta_path: str, expected: dict, occ_path: str, lab_path: str)
     with open(meta_path, encoding="utf-8") as f:
         saved = json.load(f)
 
-    if saved != expected:
-        return False
+    for key in ("n_samples", "rl_checkpoint", "max_objects", "max_people", "map_rows", "map_cols"):
+        if saved.get(key) != expected.get(key):
+            return False
 
     occ = np.load(occ_path, mmap_mode="r")
     lab = np.load(lab_path, mmap_mode="r")
@@ -88,7 +89,7 @@ def cache_is_valid(meta_path: str, expected: dict, occ_path: str, lab_path: str)
     )
 
 
-def estimate_cache_seconds(n_samples: int, gen_workers: int, seconds_per_room: float = 40.0) -> float:
+def estimate_cache_seconds(n_samples: int, gen_workers: int, seconds_per_room: float = 15.0) -> float:
     workers = max(1, gen_workers)
     return n_samples * seconds_per_room / workers
 
@@ -109,7 +110,7 @@ def build_split_cache(
     n_samples: int,
     seed_start: int,
     rl_checkpoint: str,
-    n_steps: int = STEPS_PER_SAMPLE,
+    n_steps: int = CACHE_STEPS_PER_SAMPLE,
     gen_workers: int = 1,
     force: bool = False,
 ) -> tuple[str, str]:
@@ -162,7 +163,7 @@ def build_split_cache(
         f"generating {split} cache: {len(pending)} rooms remaining "
         f"({done_count}/{n_samples} done, {n_steps} RL steps/room, {gen_workers} workers)"
     )
-    tqdm.write(f"estimated time for this split: ~{fmt_seconds(est)} (~40s/room on CPU)")
+    tqdm.write(f"estimated time for this split: ~{fmt_seconds(est)} (~15s/room on CPU, fast cache path)")
 
     seeds = [seed_start + idx for idx in pending]
     start = time.time()
@@ -205,7 +206,7 @@ def ensure_dataset_cache(
     n_train: int,
     n_val: int,
     rl_checkpoint: str,
-    n_steps: int = STEPS_PER_SAMPLE,
+    n_steps: int = CACHE_STEPS_PER_SAMPLE,
     gen_workers: int = 1,
     force: bool = False,
 ) -> tuple[tuple[str, str], tuple[str, str]]:
