@@ -1,6 +1,6 @@
 from src.env.echo_env import DEFAULT_MAX_STEPS
 
-N_TRAIN_SAMPLES = 450
+N_TRAIN_SAMPLES = 5_000
 N_VAL_SAMPLES = 50
 BATCH_SIZE = 16
 EPOCHS = 20
@@ -10,7 +10,7 @@ CACHE_STEPS_PER_SAMPLE = 60  # maps saturate early; much faster cache generation
 MAX_OBJECTS = 8
 MAX_PEOPLE = 4
 DATALOADER_WORKERS = 0
-DEFAULT_GEN_WORKERS = 4
+DEFAULT_GEN_WORKERS = 2
 
 DEFAULT_RL_CHECKPOINT = "checkpoints/echo_100000_steps.zip"
 CACHE_DIR = "data/cnn_cache"
