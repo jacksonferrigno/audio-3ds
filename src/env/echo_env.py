@@ -95,6 +95,14 @@ class EchoEnv(gym.Env):
 
         return obs.agent_input, {}
 
+    def reset_for_cache(self, seed: int | None = None) -> np.ndarray:
+        super().reset(seed=seed)
+        self.occupancy_map.fill(0.0)
+        self._prev_occupancy_map = self.occupancy_map.copy()
+        self.current_step = 0
+        self.emitter_pos = self.room.random_position()
+        initial = np.array([0.2, 0.8, 0.0, 1.0], dtype=np.float32)
+        return self.cache_step(initial)
 
     def step(self, action: np.ndarray):
         self.current_step += 1
@@ -127,6 +135,35 @@ class EchoEnv(gym.Env):
 
         return obs.agent_input, reward, terminated, truncated, info
 
+    def cache_step(self, action: np.ndarray) -> np.ndarray:
+        """CNN cache generation — map update + RL obs, skip reward/correlation extras."""
+        self.current_step += 1
+        f_start, f_end, direction, sweep_width, n_rays = _action_params(action)
+
+        emitted_chirp = generate_chirp(f_start, f_end)
+        echoes = cast_sweep(
+            self.room,
+            self.emitter_pos,
+            self.emitter_pos,
+            direction=direction,
+            sweep_width=sweep_width,
+            n_rays=n_rays,
+        )
+        tof_list = [e.time_of_flight for e in echoes]
+        self._prev_occupancy_map = self.occupancy_map.copy()
+        new_map = build_occupancy_map(
+            [(None, tof_list)],
+            [self.emitter_pos.copy()],
+            self.room.width,
+            self.room.height,
+        )
+        self.occupancy_map = np.clip(self.occupancy_map + new_map * 0.3, 0.0, 1.0)
+
+        received = build_echo_signal(echoes, emitted_chirp)
+        features = extract_features(received)
+        return np.concatenate(
+            [features, self.occupancy_map.flatten()],
+        ).astype(np.float32)
 
     def _get_observation(self, action: np.ndarray) -> EchoObservation:
         f_start, f_end, direction, sweep_width, n_rays = _action_params(action)
